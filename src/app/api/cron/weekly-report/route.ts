@@ -1,0 +1,57 @@
+import { createClient } from '@supabase/supabase-js'
+import { NextResponse } from 'next/server'
+import { sendTelegramMessage, formatReportMessage } from '@/lib/telegram'
+
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
+
+function getSupabaseAdmin() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    { auth: { persistSession: false } }
+  )
+}
+
+export async function GET(request: Request) {
+  const authHeader = request.headers.get('authorization')
+  if (
+    process.env.CRON_SECRET &&
+    authHeader !== `Bearer ${process.env.CRON_SECRET}`
+  ) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  try {
+    const supabase = getSupabaseAdmin()
+    const weekAgo = new Date()
+    weekAgo.setDate(weekAgo.getDate() - 7)
+
+    const [payments, expenses, orders] = await Promise.all([
+      supabase.from('payments').select('amount').gte('created_at', weekAgo.toISOString()),
+      supabase.from('expenses').select('amount').gte('created_at', weekAgo.toISOString()),
+      supabase.from('orders').select('id, total_price').gte('created_at', weekAgo.toISOString()),
+    ])
+
+    const totalRevenue = payments.data?.reduce((s, p) => s + Number(p.amount), 0) || 0
+    const totalExpenses = expenses.data?.reduce((s, e) => s + Number(e.amount), 0) || 0
+    const profit = totalRevenue - totalExpenses
+    const margin = totalRevenue > 0 ? (profit / totalRevenue) * 100 : 0
+
+    const reportData = {
+      totalRevenue,
+      totalExpenses,
+      profit,
+      margin,
+      orderCount: orders.data?.length || 0,
+      paymentCount: payments.data?.length || 0,
+    }
+
+    const message = formatReportMessage('📊 የሳምንቱ ሪፖርት', reportData)
+    await sendTelegramMessage(message)
+
+    return NextResponse.json({ success: true, report: reportData })
+  } catch (error: any) {
+    return NextResponse.json({ error: error.message }, { status: 500 })
+  }
+}
